@@ -56,3 +56,20 @@ export class CompleteVisitDto {
   @IsString()
   editedBy!: string;
 }
+
+export class ApproveTimeDto {
+  @IsString()
+  editedBy!: string;
+
+  @IsOptional()
+  @IsString()
+  notes?: string;
+}
+
+export class UpdateNotesDto {
+  @IsString()
+  editedBy!: string;
+
+  @IsString()
+  notes!: string;
+}

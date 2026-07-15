@@ -38,7 +38,7 @@ export class QueryService {
     return this.prisma.gpsPing.findMany({
       where: { vehicleId },
       orderBy: { recordedAt: 'desc' },
-      take: 100,
+      take: 200,
     });
   }
 
@@ -61,6 +61,16 @@ export class QueryService {
     const orders = await this.prisma.serviceOrder.findMany({
       where: { vehicleId },
       orderBy: { scheduledAt: 'asc' },
+      include: {
+        allocations: true,
+        visitLinks: {
+          include: {
+            siteVisit: {
+              include: { allocations: true },
+            },
+          },
+        },
+      },
     });
     const visits = await this.prisma.siteVisit.findMany({
       where: {
@@ -73,10 +83,70 @@ export class QueryService {
       include: {
         orderLinks: { include: { serviceOrder: true } },
         allocations: true,
+        audits: { orderBy: { editedAt: 'desc' }, take: 10 },
       },
       orderBy: { createdAt: 'asc' },
     });
-    return { orders, visits };
+
+    const summary = {
+      totalOrders: orders.length,
+      needsAction: visits.filter((v) =>
+        ['pending_allocation', 'confirmed'].includes(v.status),
+      ).length,
+      onSite: visits.filter((v) =>
+        ['candidate', 'on_site'].includes(v.status),
+      ).length,
+      completed: visits.filter((v) => v.status === 'completed').length,
+    };
+
+    return { orders, visits, summary, date: date ?? start.toISOString().slice(0, 10) };
+  }
+
+  async getOrderVisitHistory(orderId: string) {
+    const order = await this.prisma.serviceOrder.findUnique({
+      where: { id: orderId },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+
+    const links = await this.prisma.siteVisitOrderLink.findMany({
+      where: { serviceOrderId: orderId },
+      include: {
+        siteVisit: {
+          include: {
+            allocations: true,
+            audits: { orderBy: { editedAt: 'desc' }, take: 20 },
+          },
+        },
+      },
+      orderBy: { siteVisit: { createdAt: 'desc' } },
+    });
+
+    return {
+      order,
+      visits: links.map((l) => ({
+        ...l.siteVisit,
+        allocatedMinutes:
+          l.siteVisit.allocations.find((a) => a.serviceOrderId === orderId)
+            ?.minutes ?? null,
+      })),
+    };
+  }
+
+  async getAudits(vehicleId?: string) {
+    return this.prisma.timeEditAudit.findMany({
+      where: vehicleId
+        ? { siteVisit: { vehicleId } }
+        : undefined,
+      include: {
+        siteVisit: {
+          include: {
+            orderLinks: { include: { serviceOrder: true } },
+          },
+        },
+      },
+      orderBy: { editedAt: 'desc' },
+      take: 100,
+    });
   }
 
   async listVehicles() {
@@ -94,7 +164,9 @@ export class QueryService {
   }
 
   private async requireVehicle(vehicleId: string) {
-    const v = await this.prisma.vehicle.findUnique({ where: { id: vehicleId } });
+    const v = await this.prisma.vehicle.findUnique({
+      where: { id: vehicleId },
+    });
     if (!v) throw new NotFoundException('Vehicle not found');
     return v;
   }

@@ -6,9 +6,11 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { validateAllocations } from './domain/allocation';
 import {
+  ApproveTimeDto,
   CompleteVisitDto,
   EditVisitTimesDto,
   SaveAllocationDto,
+  UpdateNotesDto,
 } from './dto/allocation.dto';
 import { StubTimeSync, TimeSyncPort } from './time-sync.port';
 
@@ -156,6 +158,81 @@ export class AllocationService {
     return this.getVisit(id);
   }
 
+  /** One-click approve for a single-order visit (REQ-081). */
+  async approveSuggestedTime(id: string, dto: ApproveTimeDto) {
+    const visit = await this.getVisit(id);
+    if (visit.orderLinks.length !== 1) {
+      throw new BadRequestException(
+        'One-click approve is only for single-order visits; use allocation for multi-order',
+      );
+    }
+    if (!['confirmed', 'departed', 'pending_allocation'].includes(visit.status)) {
+      throw new BadRequestException(
+        `Cannot approve in status ${visit.status}`,
+      );
+    }
+    if (visit.dwellMinutes == null) {
+      throw new BadRequestException('No suggested dwell time yet');
+    }
+
+    const orderId = visit.orderLinks[0].serviceOrderId;
+    await this.prisma.$transaction(async (tx) => {
+      await tx.timeAllocation.deleteMany({ where: { siteVisitId: id } });
+      await tx.timeAllocation.create({
+        data: {
+          siteVisitId: id,
+          serviceOrderId: orderId,
+          minutes: visit.dwellMinutes!,
+          isNonBillable: false,
+        },
+      });
+      await tx.siteVisit.update({
+        where: { id },
+        data: {
+          status: 'completed',
+          syncStatus: 'queued',
+          notes: dto.notes ?? visit.notes,
+        },
+      });
+      await tx.serviceOrder.update({
+        where: { id: orderId },
+        data: { status: 'completed' },
+      });
+      await tx.timeEditAudit.create({
+        data: {
+          siteVisitId: id,
+          field: 'status',
+          oldValue: visit.status,
+          newValue: 'completed',
+          reason: 'one-click time approval',
+          editedBy: dto.editedBy,
+        },
+      });
+    });
+
+    await this.timeSync.enqueueApprovedHours(id);
+    return this.getVisit(id);
+  }
+
+  async updateNotes(id: string, dto: UpdateNotesDto) {
+    await this.getVisit(id);
+    await this.prisma.siteVisit.update({
+      where: { id },
+      data: { notes: dto.notes },
+    });
+    await this.prisma.timeEditAudit.create({
+      data: {
+        siteVisitId: id,
+        field: 'notes',
+        oldValue: '',
+        newValue: dto.notes,
+        reason: 'notes updated',
+        editedBy: dto.editedBy,
+      },
+    });
+    return this.getVisit(id);
+  }
+
   async complete(id: string, dto: CompleteVisitDto) {
     const visit = await this.getVisit(id);
     if (!['allocated', 'confirmed'].includes(visit.status)) {
@@ -164,10 +241,15 @@ export class AllocationService {
       );
     }
 
+    // Single-order confirmed visits: auto-create full dwell allocation
+    if (visit.status === 'confirmed' && visit.orderLinks.length === 1) {
+      return this.approveSuggestedTime(id, { editedBy: dto.editedBy });
+    }
+
     await this.prisma.$transaction(async (tx) => {
       await tx.siteVisit.update({
         where: { id },
-        data: { status: 'completed' },
+        data: { status: 'completed', syncStatus: 'queued' },
       });
       await tx.serviceOrder.updateMany({
         where: {

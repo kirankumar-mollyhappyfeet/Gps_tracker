@@ -1,58 +1,54 @@
-# Knopvvs — Vehicle GPS Site Visit Time Tracking
+# Knopvvs — GPS Tracking & Time Tracking
 
-MVP for vehicle GPS → location blocks (Home / Traveled / Stationary) → site visits → multi-order time allocation (±30 minutes).
-
-## Prerequisites
-
-- Node.js 20+
-- Local SQLite (default — Docker Hub Postgres was unavailable during setup)
-
-## Setup
-
-```bash
-npm install
-cd apps/api
-cp .env.example .env
-npx prisma migrate dev
-npx prisma db seed
-```
+Complete MVP for **vehicle GPS** and **technician time tracking** (including multi-order same-building splits).
 
 ## Run
 
-Terminal 1 — API (port 3001):
-
-```bash
+```powershell
+# Terminal 1 — API
+cd C:\Users\Kiran\OneDrive\Desktop\knopvvs
 npm run api:dev
-```
 
-Terminal 2 — Web (port 3000):
-
-```bash
+# Terminal 2 — Web
 npm run web:dev
 ```
 
-## Demo day simulator
+## Reset demo + simulate a full day
 
-With the API running:
-
-```bash
-node scripts/simulate-gps-day.js
+```powershell
+cd C:\Users\Kiran\OneDrive\Desktop\knopvvs\apps\api
+npx prisma db seed
+cd ..\..
+node scripts\simulate-gps-day.js
 ```
 
-Expected blocks: `home → traveled → stationary → traveled`  
-Expected visit: `pending_allocation` with 3 orders and ~120 min dwell.
+Simulator creates:
 
-Then open http://localhost:3000/tech to allocate time across the three building orders, or http://localhost:3000/admin for the block timeline.
+1. **Single order** (Hansen Villa) → visit status `confirmed` → **One-click approve**
+2. **Three orders** same building (Acme) → `pending_allocation` → **split times**
+
+## Test in the UI
+
+| Page | URL | What to do |
+|------|-----|------------|
+| Home | http://localhost:3000 | Overview + instructions |
+| Technician | http://localhost:3000/tech | Approve Hansen; allocate Acme 1/2/3; correct times; visit history; Maps route |
+| Admin | http://localhost:3000/admin | Live position, location blocks, raw pings, geofence, edit audit |
+
+## Features covered
+
+- GPS ping ingest → Home / Traveled / Stationary blocks
+- Geofence arrive (2 pings) / leave → suggested dwell
+- Single-order one-click approve (REQ-081 style) + sync queued stub
+- Multi-order forced allocation (±30 min)
+- Manual time correction + audit
+- Visit history per order
+- Practical access info on order cards
+- Admin GPS timeline + audits
 
 ## Tests
 
-```bash
-cd apps/api && npm test
+```powershell
+cd apps\api
+npm test
 ```
-
-## Notes
-
-- Device id in seed: `tracker-van-1`
-- Allocation tolerance: ±30 minutes (`ALLOCATION_TOLERANCE_MINUTES`)
-- Ordrestyring hours sync is stubbed (`StubTimeSync`)
-- Switch `DATABASE_URL` to Postgres when available (see `.env.example`)

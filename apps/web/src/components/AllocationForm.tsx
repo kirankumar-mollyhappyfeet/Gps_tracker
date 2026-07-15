@@ -11,8 +11,6 @@ type OrderLink = {
 type Visit = {
   id: string;
   status: string;
-  arrivedAt?: string;
-  departedAt?: string;
   dwellMinutes?: number;
   orderLinks: OrderLink[];
 };
@@ -25,11 +23,13 @@ export function AllocationForm({
   onDone: () => void;
 }) {
   const orders = visit.orderLinks;
+  const dwell = visit.dwellMinutes ?? 0;
   const [minutes, setMinutes] = useState<Record<string, number>>(() => {
-    const even = Math.floor((visit.dwellMinutes ?? 0) / Math.max(orders.length, 1));
+    const even = Math.floor(dwell / Math.max(orders.length, 1));
     const init: Record<string, number> = {};
-    orders.forEach((o) => {
-      init[o.serviceOrderId] = even;
+    orders.forEach((o, i) => {
+      init[o.serviceOrderId] =
+        i === orders.length - 1 ? dwell - even * (orders.length - 1) : even;
     });
     return init;
   });
@@ -43,7 +43,6 @@ export function AllocationForm({
       (Number(nonBillable) || 0),
     [minutes, nonBillable],
   );
-  const dwell = visit.dwellMinutes ?? 0;
   const delta = Math.abs(sum - dwell);
   const ok = delta <= 30;
 
@@ -76,20 +75,27 @@ export function AllocationForm({
   }
 
   return (
-    <div className="mt-3 space-y-3 rounded border border-slate-300 bg-slate-50 p-4">
-      <p className="text-sm text-slate-700">
-        GPS dwell: <strong>{dwell} min</strong> · Allocated:{' '}
-        <strong>{sum} min</strong> · Delta: <strong>{delta} min</strong>{' '}
-        (must be ≤ 30)
+    <div className="mt-4 space-y-3 rounded-xl border border-[var(--line)] bg-[var(--accent-soft)]/40 p-4">
+      <div>
+        <p className="font-display text-lg">Split time across orders</p>
+        <p className="text-sm text-[var(--muted)]">
+          GPS recorded <strong>{dwell} min</strong> on site. Allocate each
+          apartment/job (sum within ±30 min).
+        </p>
+      </div>
+      <p className="text-sm">
+        Allocated <strong>{sum}</strong> · delta <strong>{delta}</strong> min{' '}
+        {ok ? '✓' : '(too far from dwell)'}
       </p>
       {orders.map((o) => (
-        <label key={o.serviceOrderId} className="flex flex-col gap-1 text-sm">
-          <span>
-            {o.serviceOrder.customerName} — {o.serviceOrder.address}
+        <label key={o.serviceOrderId} className="block text-sm">
+          <span className="font-medium">{o.serviceOrder.customerName}</span>
+          <span className="block text-xs text-[var(--muted)]">
+            {o.serviceOrder.address}
           </span>
           <input
             type="number"
-            className="rounded border px-2 py-1"
+            className="field mt-1"
             value={minutes[o.serviceOrderId] ?? 0}
             onChange={(e) =>
               setMinutes((m) => ({
@@ -100,23 +106,23 @@ export function AllocationForm({
           />
         </label>
       ))}
-      <label className="flex flex-col gap-1 text-sm">
-        <span>Non-billable / waiting (optional)</span>
+      <label className="block text-sm">
+        Non-billable / waiting (optional)
         <input
           type="number"
-          className="rounded border px-2 py-1"
+          className="field mt-1"
           value={nonBillable}
           onChange={(e) => setNonBillable(Number(e.target.value))}
         />
       </label>
-      {error && <p className="text-sm text-red-600">{error}</p>}
+      {error && <p className="text-sm text-red-700">{error}</p>}
       <button
         type="button"
+        className="btn btn-accent"
         disabled={!ok || busy}
         onClick={saveAndComplete}
-        className="rounded bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-40"
       >
-        {busy ? 'Saving…' : 'Save allocation & complete'}
+        {busy ? 'Saving…' : 'Save split & complete visit'}
       </button>
     </div>
   );

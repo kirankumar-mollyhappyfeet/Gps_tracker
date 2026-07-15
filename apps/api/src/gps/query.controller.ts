@@ -25,6 +25,11 @@ export class QueryController {
     return this.queryService.getLive(id);
   }
 
+  @Get('vehicles/:id/audits')
+  getAudits(@Param('id') id: string) {
+    return this.queryService.getAudits(id);
+  }
+
   @Patch('vehicles/:id/geofence')
   updateGeofence(
     @Param('id') id: string,
@@ -39,5 +44,10 @@ export class QueryController {
     @Query('date') date?: string,
   ) {
     return this.queryService.getTechDay(vehicleId, date);
+  }
+
+  @Get('orders/:id/visits')
+  getOrderVisits(@Param('id') id: string) {
+    return this.queryService.getOrderVisitHistory(id);
   }
 }
