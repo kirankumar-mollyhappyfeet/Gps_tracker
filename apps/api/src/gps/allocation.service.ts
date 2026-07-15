@@ -215,7 +215,8 @@ export class AllocationService {
   }
 
   async updateNotes(id: string, dto: UpdateNotesDto) {
-    await this.getVisit(id);
+    const visit = await this.getVisit(id);
+    const previousNotes = visit.notes ?? '';
     await this.prisma.siteVisit.update({
       where: { id },
       data: { notes: dto.notes },
@@ -224,7 +225,7 @@ export class AllocationService {
       data: {
         siteVisitId: id,
         field: 'notes',
-        oldValue: '',
+        oldValue: previousNotes,
         newValue: dto.notes,
         reason: 'notes updated',
         editedBy: dto.editedBy,

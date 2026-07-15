@@ -1,10 +1,11 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { apiGet, apiPatch, apiPost } from '@/lib/api';
 import { AppNav } from '@/components/AppNav';
 import { AllocationForm } from '@/components/AllocationForm';
-import { StatusChip, formatTime, mapsUrl } from '@/lib/format';
+import { formatTime, mapsUrl } from '@/lib/format';
+import { StatusChip } from '@/components/StatusChip';
 
 type Vehicle = { id: string; name: string };
 type Order = {
@@ -22,7 +23,15 @@ type Order = {
   onSiteContact?: string;
   onSitePhone?: string;
   safetyNotes?: string;
-  visitLinks: { siteVisit: { id: string; status: string; dwellMinutes?: number; arrivedAt?: string; departedAt?: string } }[];
+  visitLinks: {
+    siteVisit: {
+      id: string;
+      status: string;
+      dwellMinutes?: number;
+      arrivedAt?: string;
+      departedAt?: string;
+    };
+  }[];
 };
 type Visit = {
   id: string;
@@ -49,11 +58,34 @@ type Day = {
   };
 };
 
+const ACTION_STATUSES = new Set([
+  'confirmed',
+  'pending_allocation',
+  'allocated',
+]);
+const ACTIVE_GPS = new Set(['candidate', 'on_site']);
+
+function orderRole(
+  order: Order,
+  actionVisits: Visit[],
+): 'done' | 'action' | 'current' | 'up_next' | 'later' {
+  if (order.status === 'completed') return 'done';
+  if (
+    actionVisits.some((v) =>
+      v.orderLinks.some((l) => l.serviceOrderId === order.id),
+    )
+  ) {
+    return 'action';
+  }
+  if (['arrived', 'on_site'].includes(order.status)) return 'current';
+  if (order.status === 'scheduled') return 'up_next';
+  return 'later';
+}
+
 export default function TechPage() {
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [vehicleId, setVehicleId] = useState('');
   const [day, setDay] = useState<Day | null>(null);
-  const [historyOrderId, setHistoryOrderId] = useState<string | null>(null);
   const [history, setHistory] = useState<{
     order: Order;
     visits: Visit[];
@@ -84,8 +116,41 @@ export default function TechPage() {
       .catch((e) => setError(String(e.message ?? e)));
   }, [load]);
 
+  const actionVisits = useMemo(
+    () => day?.visits.filter((v) => ACTION_STATUSES.has(v.status)) ?? [],
+    [day],
+  );
+  const liveVisits = useMemo(
+    () => day?.visits.filter((v) => ACTIVE_GPS.has(v.status)) ?? [],
+    [day],
+  );
+  const doneVisits = useMemo(
+    () => day?.visits.filter((v) => v.status === 'completed') ?? [],
+    [day],
+  );
+
+  const sortedOrders = useMemo(() => {
+    if (!day) return [];
+    return [...day.orders].sort(
+      (a, b) =>
+        new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime(),
+    );
+  }, [day]);
+
+  const upNextOrder = useMemo(() => {
+    const remaining = sortedOrders.filter((o) => o.status === 'scheduled');
+    // Prefer earliest scheduled that is not already in an action visit
+    return (
+      remaining.find(
+        (o) =>
+          !actionVisits.some((v) =>
+            v.orderLinks.some((l) => l.serviceOrderId === o.id),
+          ),
+      ) ?? null
+    );
+  }, [sortedOrders, actionVisits]);
+
   async function openHistory(orderId: string) {
-    setHistoryOrderId(orderId);
     const h = await apiGet<{ order: Order; visits: Visit[] }>(
       `/orders/${orderId}/visits`,
     );
@@ -102,7 +167,8 @@ export default function TechPage() {
               Technician day
             </h1>
             <p className="text-[var(--muted)]">
-              GPS suggests times · you approve or split multi-order stops
+              GPS suggests times · approve single stops or split multi-order
+              buildings
             </p>
           </div>
           <label className="text-sm">
@@ -148,193 +214,198 @@ export default function TechPage() {
           </div>
         )}
 
+        {upNextOrder && actionVisits.length === 0 && liveVisits.length === 0 && (
+          <section className="card border-l-4 border-l-[var(--accent)] p-5">
+            <p className="text-xs uppercase tracking-wide text-[var(--muted)]">
+              Up next (after last completed stop)
+            </p>
+            <p className="mt-1 font-display text-2xl">
+              {upNextOrder.customerName}
+            </p>
+            <p className="text-sm text-[var(--muted)]">{upNextOrder.address}</p>
+            <p className="mt-2 text-sm">
+              Drive there — GPS will open a visit when the van enters the
+              geofence. Status stays <StatusChip status="scheduled" /> until
+              arrive.
+            </p>
+            <a
+              className="btn btn-primary mt-3"
+              href={mapsUrl(upNextOrder.lat, upNextOrder.lng)}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open route in Maps
+            </a>
+          </section>
+        )}
+
+        {liveVisits.length > 0 && (
+          <section className="space-y-3">
+            <h2 className="font-display text-xl">Live GPS stop</h2>
+            {liveVisits.map((v) => (
+              <VisitCard
+                key={v.id}
+                v={v}
+                busy={busy}
+                onApprove={async () => {
+                  setBusy(true);
+                  try {
+                    await apiPost(`/site-visits/${v.id}/approve`, {
+                      editedBy: 'tech-lars',
+                    });
+                    await load(vehicleId);
+                  } catch (e) {
+                    setError(String((e as Error).message ?? e));
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                onEdit={() => {
+                  setEditVisit(v);
+                  setEditArrive(
+                    v.arrivedAt
+                      ? new Date(v.arrivedAt).toISOString().slice(0, 16)
+                      : '',
+                  );
+                  setEditDepart(
+                    v.departedAt
+                      ? new Date(v.departedAt).toISOString().slice(0, 16)
+                      : '',
+                  );
+                  setEditReason('');
+                }}
+                onHistory={openHistory}
+                onAllocated={() => load(vehicleId)}
+              />
+            ))}
+          </section>
+        )}
+
         <section className="space-y-4">
-          <h2 className="font-display text-xl">Site visits needing review</h2>
-          {!day?.visits.length && (
+          <h2 className="font-display text-xl">Needs your action</h2>
+          {!actionVisits.length && (
             <p className="card p-4 text-sm text-[var(--muted)]">
-              No visits yet. Seed DB and run{' '}
-              <code className="rounded bg-black/5 px-1">
-                node scripts/simulate-gps-day.js
-              </code>
+              Nothing waiting. Complete a GPS stop (or run the simulator), then
+              approve time or split multi-order minutes here.
             </p>
           )}
-          {day?.visits.map((v) => (
-            <article key={v.id} className="card overflow-hidden">
-              <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] bg-black/[0.02] px-5 py-4">
-                <div>
-                  <div className="mb-1 flex flex-wrap items-center gap-2">
-                    <StatusChip status={v.status} />
-                    {v.syncStatus === 'queued' && (
-                      <StatusChip status="queued" />
-                    )}
-                    <span className="text-xs text-[var(--muted)]">
-                      {v.orderLinks.length} order
-                      {v.orderLinks.length === 1 ? '' : 's'}
-                    </span>
-                  </div>
-                  <p className="text-sm">
-                    Arrive {formatTime(v.arrivedAt)} · Leave{' '}
-                    {formatTime(v.departedAt)} · Dwell{' '}
-                    <strong>{v.dwellMinutes ?? '—'} min</strong>
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {(v.status === 'confirmed' ||
-                    v.status === 'pending_allocation' ||
-                    v.status === 'allocated') && (
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      onClick={() => {
-                        setEditVisit(v);
-                        setEditArrive(
-                          v.arrivedAt
-                            ? new Date(v.arrivedAt).toISOString().slice(0, 16)
-                            : '',
-                        );
-                        setEditDepart(
-                          v.departedAt
-                            ? new Date(v.departedAt).toISOString().slice(0, 16)
-                            : '',
-                        );
-                        setEditReason('');
-                      }}
-                    >
-                      Correct times
-                    </button>
-                  )}
-                  {v.status === 'confirmed' && v.orderLinks.length === 1 && (
-                    <button
-                      type="button"
-                      className="btn btn-accent"
-                      disabled={busy}
-                      onClick={async () => {
-                        setBusy(true);
-                        try {
-                          await apiPost(`/site-visits/${v.id}/approve`, {
-                            editedBy: 'tech-lars',
-                          });
-                          await load(vehicleId);
-                        } catch (e) {
-                          setError(String((e as Error).message ?? e));
-                        } finally {
-                          setBusy(false);
-                        }
-                      }}
-                    >
-                      One-click approve time
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="space-y-3 px-5 py-4">
-                {v.orderLinks.map((ol) => {
-                  const o = ol.serviceOrder;
-                  return (
-                    <div
-                      key={ol.serviceOrderId}
-                      className="rounded-xl border border-[var(--line)] p-4"
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div>
-                          <p className="font-medium">{o.customerName}</p>
-                          <p className="text-sm text-[var(--muted)]">
-                            {o.address}
-                          </p>
-                          <p className="mt-1 text-sm">{o.jobDescription}</p>
-                        </div>
-                        <StatusChip status={o.status} />
-                      </div>
-                      <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
-                        {o.keyBoxLocation && (
-                          <div>
-                            <dt className="text-[var(--muted)]">Key box</dt>
-                            <dd>{o.keyBoxLocation}</dd>
-                          </div>
-                        )}
-                        {o.accessCodes && (
-                          <div>
-                            <dt className="text-[var(--muted)]">Codes</dt>
-                            <dd>{o.accessCodes}</dd>
-                          </div>
-                        )}
-                        {o.parkingInfo && (
-                          <div>
-                            <dt className="text-[var(--muted)]">Parking</dt>
-                            <dd>{o.parkingInfo}</dd>
-                          </div>
-                        )}
-                        {o.onSiteContact && (
-                          <div>
-                            <dt className="text-[var(--muted)]">Contact</dt>
-                            <dd>
-                              {o.onSiteContact} {o.onSitePhone}
-                            </dd>
-                          </div>
-                        )}
-                        {o.safetyNotes && (
-                          <div className="sm:col-span-2">
-                            <dt className="text-[var(--muted)]">Safety</dt>
-                            <dd>{o.safetyNotes}</dd>
-                          </div>
-                        )}
-                      </dl>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <a
-                          className="btn btn-ghost"
-                          href={mapsUrl(o.lat, o.lng)}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          Open route in Maps
-                        </a>
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          onClick={() => openHistory(o.id)}
-                        >
-                          Visit history
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {v.status === 'pending_allocation' && (
-                  <AllocationForm visit={v} onDone={() => load(vehicleId)} />
-                )}
-              </div>
-            </article>
+          {actionVisits.map((v) => (
+            <VisitCard
+              key={v.id}
+              v={v}
+              busy={busy}
+              onApprove={async () => {
+                setBusy(true);
+                try {
+                  await apiPost(`/site-visits/${v.id}/approve`, {
+                    editedBy: 'tech-lars',
+                  });
+                  await load(vehicleId);
+                } catch (e) {
+                  setError(String((e as Error).message ?? e));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              onEdit={() => {
+                setEditVisit(v);
+                setEditArrive(
+                  v.arrivedAt
+                    ? new Date(v.arrivedAt).toISOString().slice(0, 16)
+                    : '',
+                );
+                setEditDepart(
+                  v.departedAt
+                    ? new Date(v.departedAt).toISOString().slice(0, 16)
+                    : '',
+                );
+                setEditReason('');
+              }}
+              onHistory={openHistory}
+              onAllocated={() => load(vehicleId)}
+            />
           ))}
         </section>
 
+        {doneVisits.length > 0 && (
+          <section className="space-y-3">
+            <h2 className="font-display text-xl">Completed visits</h2>
+            <ul className="space-y-2">
+              {doneVisits.map((v) => (
+                <li
+                  key={v.id}
+                  className="card flex flex-wrap items-center justify-between gap-2 px-4 py-3 text-sm"
+                >
+                  <span>
+                    {v.orderLinks
+                      .map((l) => l.serviceOrder.customerName)
+                      .join(', ')}{' '}
+                    · {formatTime(v.arrivedAt)} – {formatTime(v.departedAt)} ·{' '}
+                    {v.dwellMinutes ?? '—'} min
+                  </span>
+                  <StatusChip status="completed" />
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
         <section className="space-y-3">
-          <h2 className="font-display text-xl">All assigned orders</h2>
+          <h2 className="font-display text-xl">Day board (all orders)</h2>
+          <p className="text-sm text-[var(--muted)]">
+            Every order for this van is already assigned for the day. GPS does
+            not re-assign — it activates the stop when you arrive.
+          </p>
           <div className="grid gap-3">
-            {day?.orders.map((o) => (
-              <div key={o.id} className="card flex flex-wrap items-center justify-between gap-3 p-4">
-                <div>
-                  <p className="font-medium">
-                    {o.customerName}{' '}
-                    <span className="text-sm font-normal text-[var(--muted)]">
-                      · {new Date(o.scheduledAt).toISOString().slice(11, 16)} UTC
-                    </span>
-                  </p>
-                  <p className="text-sm text-[var(--muted)]">{o.address}</p>
+            {sortedOrders.map((o) => {
+              const role = orderRole(o, actionVisits);
+              const roleLabel =
+                role === 'done'
+                  ? 'Done'
+                  : role === 'action'
+                    ? 'Waiting on you'
+                    : role === 'current'
+                      ? 'Current stop'
+                      : role === 'up_next' && upNextOrder?.id === o.id
+                        ? 'Up next'
+                        : role === 'up_next'
+                          ? 'Queued'
+                          : 'Later';
+              return (
+                <div
+                  key={o.id}
+                  className={`card flex flex-wrap items-center justify-between gap-3 p-4 ${
+                    role === 'up_next' && upNextOrder?.id === o.id
+                      ? 'ring-2 ring-[var(--accent)]'
+                      : ''
+                  }`}
+                >
+                  <div>
+                    <p className="font-medium">
+                      {o.customerName}{' '}
+                      <span className="text-sm font-normal text-[var(--muted)]">
+                        · {new Date(o.scheduledAt).toISOString().slice(11, 16)}{' '}
+                        UTC
+                      </span>
+                    </p>
+                    <p className="text-sm text-[var(--muted)]">{o.address}</p>
+                    <p className="mt-1 text-xs uppercase tracking-wide text-[var(--accent)]">
+                      {roleLabel}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <StatusChip status={o.status} />
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => openHistory(o.id)}
+                    >
+                      History
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <StatusChip status={o.status} />
-                  <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => openHistory(o.id)}
-                  >
-                    History
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
 
@@ -415,10 +486,7 @@ export default function TechPage() {
                 <button
                   type="button"
                   className="btn btn-ghost"
-                  onClick={() => {
-                    setHistory(null);
-                    setHistoryOrderId(null);
-                  }}
+                  onClick={() => setHistory(null)}
                 >
                   Close
                 </button>
@@ -428,7 +496,10 @@ export default function TechPage() {
               )}
               <ul className="space-y-2">
                 {history.visits.map((v) => (
-                  <li key={v.id} className="rounded-lg border border-[var(--line)] p-3 text-sm">
+                  <li
+                    key={v.id}
+                    className="rounded-lg border border-[var(--line)] p-3 text-sm"
+                  >
                     <StatusChip status={v.status} />
                     <p className="mt-1">
                       {formatTime(v.arrivedAt)} – {formatTime(v.departedAt)} ·{' '}
@@ -442,5 +513,137 @@ export default function TechPage() {
         )}
       </main>
     </div>
+  );
+}
+
+function VisitCard({
+  v,
+  busy,
+  onApprove,
+  onEdit,
+  onHistory,
+  onAllocated,
+}: {
+  v: Visit;
+  busy: boolean;
+  onApprove: () => void;
+  onEdit: () => void;
+  onHistory: (orderId: string) => void;
+  onAllocated: () => void;
+}) {
+  return (
+    <article className="card overflow-hidden">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] bg-black/[0.02] px-5 py-4">
+        <div>
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <StatusChip status={v.status} />
+            {v.syncStatus === 'queued' && <StatusChip status="queued" />}
+            <span className="text-xs text-[var(--muted)]">
+              {v.orderLinks.length} order
+              {v.orderLinks.length === 1 ? '' : 's'}
+            </span>
+          </div>
+          <p className="text-sm">
+            Arrive {formatTime(v.arrivedAt)} · Leave {formatTime(v.departedAt)}{' '}
+            · Dwell <strong>{v.dwellMinutes ?? '—'} min</strong>
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {(v.status === 'confirmed' ||
+            v.status === 'pending_allocation' ||
+            v.status === 'allocated') && (
+            <button type="button" className="btn btn-ghost" onClick={onEdit}>
+              Correct times
+            </button>
+          )}
+          {v.status === 'confirmed' && v.orderLinks.length === 1 && (
+            <button
+              type="button"
+              className="btn btn-accent"
+              disabled={busy}
+              onClick={onApprove}
+            >
+              One-click approve time
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-3 px-5 py-4">
+        {v.orderLinks.map((ol) => {
+          const o = ol.serviceOrder;
+          return (
+            <div
+              key={ol.serviceOrderId}
+              className="rounded-xl border border-[var(--line)] p-4"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <p className="font-medium">{o.customerName}</p>
+                  <p className="text-sm text-[var(--muted)]">{o.address}</p>
+                  <p className="mt-1 text-sm">{o.jobDescription}</p>
+                </div>
+                <StatusChip status={o.status} />
+              </div>
+              <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+                {o.keyBoxLocation && (
+                  <div>
+                    <dt className="text-[var(--muted)]">Key box</dt>
+                    <dd>{o.keyBoxLocation}</dd>
+                  </div>
+                )}
+                {o.accessCodes && (
+                  <div>
+                    <dt className="text-[var(--muted)]">Codes</dt>
+                    <dd>{o.accessCodes}</dd>
+                  </div>
+                )}
+                {o.parkingInfo && (
+                  <div>
+                    <dt className="text-[var(--muted)]">Parking</dt>
+                    <dd>{o.parkingInfo}</dd>
+                  </div>
+                )}
+                {o.onSiteContact && (
+                  <div>
+                    <dt className="text-[var(--muted)]">Contact</dt>
+                    <dd>
+                      {o.onSiteContact} {o.onSitePhone}
+                    </dd>
+                  </div>
+                )}
+                {o.safetyNotes && (
+                  <div className="sm:col-span-2">
+                    <dt className="text-[var(--muted)]">Safety</dt>
+                    <dd>{o.safetyNotes}</dd>
+                  </div>
+                )}
+              </dl>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <a
+                  className="btn btn-ghost"
+                  href={mapsUrl(o.lat, o.lng)}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open route in Maps
+                </a>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => onHistory(o.id)}
+                >
+                  Visit history
+                </button>
+              </div>
+            </div>
+          );
+        })}
+
+        {v.status === 'pending_allocation' && (
+          <AllocationForm visit={v} onDone={onAllocated} />
+        )}
+      </div>
+    </article>
   );
 }
