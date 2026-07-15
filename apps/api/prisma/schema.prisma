@@ -1,0 +1,146 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Organization {
+  id        String         @id @default(cuid())
+  name      String
+  createdAt DateTime       @default(now())
+  vehicles  Vehicle[]
+  orders    ServiceOrder[]
+}
+
+model Vehicle {
+  id                   String          @id @default(cuid())
+  organizationId       String
+  organization         Organization    @relation(fields: [organizationId], references: [id])
+  name                 String
+  homeLat              Float
+  homeLng              Float
+  geofenceRadiusMeters Int             @default(150)
+  device               GpsDevice?
+  pings                GpsPing[]
+  blocks               LocationBlock[]
+  orders               ServiceOrder[]
+  siteVisits           SiteVisit[]
+  createdAt            DateTime        @default(now())
+}
+
+model GpsDevice {
+  id         String  @id @default(cuid())
+  vehicleId  String  @unique
+  vehicle    Vehicle @relation(fields: [vehicleId], references: [id])
+  externalId String  @unique
+}
+
+model GpsPing {
+  id         String   @id @default(cuid())
+  vehicleId  String
+  vehicle    Vehicle  @relation(fields: [vehicleId], references: [id])
+  deviceId   String
+  lat        Float
+  lng        Float
+  recordedAt DateTime
+  speed      Float?
+  ignition   Boolean?
+  createdAt  DateTime @default(now())
+
+  @@unique([deviceId, recordedAt])
+  @@index([vehicleId, recordedAt])
+}
+
+model LocationBlock {
+  id         String     @id @default(cuid())
+  vehicleId  String
+  vehicle    Vehicle    @relation(fields: [vehicleId], references: [id])
+  type       String
+  status     String     @default("open")
+  startAt    DateTime
+  endAt      DateTime?
+  centerLat  Float
+  centerLng  Float
+  siteVisits SiteVisit[]
+  createdAt  DateTime   @default(now())
+
+  @@index([vehicleId, startAt])
+}
+
+model ServiceOrder {
+  id                String               @id @default(cuid())
+  organizationId    String
+  organization      Organization         @relation(fields: [organizationId], references: [id])
+  externalRef       String?
+  customerName      String
+  address           String
+  lat               Float
+  lng               Float
+  serviceLocationId String?
+  scheduledAt       DateTime
+  technicianName    String
+  vehicleId         String
+  vehicle           Vehicle              @relation(fields: [vehicleId], references: [id])
+  status            String               @default("scheduled")
+  visitLinks        SiteVisitOrderLink[]
+  allocations       TimeAllocation[]
+  createdAt         DateTime             @default(now())
+
+  @@index([vehicleId, scheduledAt])
+  @@index([serviceLocationId])
+}
+
+model SiteVisit {
+  id               String               @id @default(cuid())
+  vehicleId        String
+  vehicle          Vehicle              @relation(fields: [vehicleId], references: [id])
+  locationBlockId  String?
+  locationBlock    LocationBlock?       @relation(fields: [locationBlockId], references: [id])
+  status           String               @default("candidate")
+  arrivedAt        DateTime?
+  departedAt       DateTime?
+  lastInFenceAt    DateTime?
+  dwellMinutes     Int?
+  inFencePingCount Int                  @default(0)
+  orderLinks       SiteVisitOrderLink[]
+  allocations      TimeAllocation[]
+  audits           TimeEditAudit[]
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+}
+
+model SiteVisitOrderLink {
+  id             String       @id @default(cuid())
+  siteVisitId    String
+  siteVisit      SiteVisit    @relation(fields: [siteVisitId], references: [id])
+  serviceOrderId String
+  serviceOrder   ServiceOrder @relation(fields: [serviceOrderId], references: [id])
+
+  @@unique([siteVisitId, serviceOrderId])
+}
+
+model TimeAllocation {
+  id             String        @id @default(cuid())
+  siteVisitId    String
+  siteVisit      SiteVisit     @relation(fields: [siteVisitId], references: [id])
+  serviceOrderId String?
+  serviceOrder   ServiceOrder? @relation(fields: [serviceOrderId], references: [id])
+  minutes        Int
+  isNonBillable  Boolean       @default(false)
+  createdAt      DateTime      @default(now())
+}
+
+model TimeEditAudit {
+  id          String    @id @default(cuid())
+  siteVisitId String
+  siteVisit   SiteVisit @relation(fields: [siteVisitId], references: [id])
+  field       String
+  oldValue    String
+  newValue    String
+  reason      String
+  editedBy    String
+  editedAt    DateTime  @default(now())
+}
